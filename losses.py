@@ -4,54 +4,50 @@ import torchvision
 import torch.nn as nn
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def generator_loss(gan_type, fake):
-    loss = []
-    fake_loss = 0
-
-    for i in range(len(fake)):
-        if gan_type == "gan":
-            fake_loss = torch.mean(F.binary_cross_entropy_with_logits(input=torch.ones_like(fake[i][-1]), target=fake[i][-1]))
+# Defines the GAN loss which uses either LSGAN or the regular GAN.
+# When LSGAN is used, it is basically same as MSELoss,
+# but it abstracts away the need to create the target label tensor
+# that has the same size as the input
+class GANLoss(nn.Module):
+    def __init__(self, target_real_label=1.0, target_fake_label=0.0,
+                 tensor=torch.FloatTensor, opt=None):
+        super(GANLoss, self).__init__()
         
-        loss.append(fake_loss)
-    return torch.mean(torch.FloatTensor(loss))
+        self.real_label = target_real_label
+        self.fake_label = target_fake_label
 
-def discriminator_loss(loss_func, real, fake):
-    loss = 0
-    real_loss = 0
-    fake_loss = 0
+        self.real_label_tensor = None
+        self.fake_label_tensor = None
+        
+        self.Tensor = tensor
+        self.opt = opt
+        
+    def get_target_tensor(self, input, target_is_real):
+        if target_is_real: # target_is_real이 True이면 (target은 real이다.)
+            if self.real_label_tensor is None: # self.real_label_tensor가 없을 때
+                self.real_label_tensor = self.Tensor(1).fill_(self.real_label) 
+                self.real_label_tensor.requires_grad_(False)
+            return self.real_label_tensor.expand_as(input) # self.real_label_tensor 는 input 크기만큼 1.0으로 채운 tensor
+        else: # target은 false이다.
+            if self.fake_label_tensor is None:
+                self.fake_label_tensor = self.Tensor(1).fill_(self.fake_label)
+                self.fake_label_tensor.requires_grad_(False)
+            return self.fake_label_tensor.expand_as(input) # self.fake_label_tensor 는 input 크기 만큼 0.0으로 채운 tensor
 
-    for i in range(len(fake)):
-        if loss_func == 'gan':
-            real_loss = torch.mean(
-                F.binary_cross_entropy_with_logits(input=torch.ones_like(real[i][-1]), target=real[i][-1]))
-            fake_loss = torch.mean(
-                F.binary_cross_entropy_with_logits(input=torch.zeros_like(fake[i][-1]), target=fake[i][-1]))
+    def loss(self, input, target_is_real):
+        target_tensor = self.get_target_tensor(input, target_is_real)
+        loss = F.binary_cross_entropy_with_logits(input, target_tensor)
+        return loss
+            
+    def __call__(self, input, target_is_real):
+        # computing loss is a bit complicated because |input| may not be
+        # a tensor, but list of tensors in case of multiscale discriminator
+        return self.loss(input, target_is_real)
 
-        # loss.append(real_loss + (fake_loss))
-        loss += (real_loss + fake_loss)
-    # return torch.mean(torch.FloatTensor(loss))
-    return loss / len(fake)
-
-# KL loss 는 encoder 를 사용할 때에만 쓰인다.
-def kl_loss(mean, logvar):
-    # loss = 0.5 * torch.sum(torch.square(mean) + torch.exp(logvar) - 1 - logvar) # tensorflow 버전
-    return -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp()) # official 버전
-
-def L1_loss(x, y):
-    loss = torch.mean(torch.abs(x - y))
-
-    return loss
-
-def feature_loss(real, fake):
-    loss = []
-
-    for i in range(len(fake)):
-        intermediate_loss = 0
-        for j in range(len(fake[i]) - 1) :
-            intermediate_loss += L1_loss(real[i][j], fake[i][j])
-        loss.append(intermediate_loss)
-
-    return torch.mean(torch.Tensor(loss))
+# KL Divergence loss used in VAE with an image encoder
+class KLDLoss(nn.Module):
+    def forward(self, mu, logvar):
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
 class VGG19(torch.nn.Module):
     def __init__(self, requires_grad=False):
