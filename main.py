@@ -8,6 +8,8 @@ import time
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
+from torchvision import transforms
+from PIL import Image
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -15,7 +17,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 """parsing and configuration"""
 def parse_args():
-    parser = argparse.ArgumentParser(description='parameters for model')
+    parser = argparse.ArgumentParser()
 
     parser.add_argument('--dataset_path', type=str, default='./dataset/spade_celebA', help='The path of dataset')
 
@@ -25,14 +27,8 @@ def parse_args():
     parser.add_argument('--segmap_ch', type=int, default=3, help='The size of segmap channel')
     parser.add_argument('--augment_flag', type=bool, default=False, help='Image augmentation use or not')
 
-    parser.add_argument('--batch_size', type=int, default=1, help='The size of batch size')
+    parser.add_argument('--batch_size', type=int, default=1, help='The size of batch size') # batch size를 1에서 16으로 늘렸더니 gpu memory leak가 나타났다.
     parser.add_argument('--random_style', type=bool, default=False, help='if randmo style is false, it means "use an encoder"')
-
-    # parser.add_argument('--random_style', type=bool, default=False, help='enable training with an image encoder.')
-    parser.add_argument('--num_upsampling_layers', type=str, default='more',
-                        choices=('normal', 'more', 'most'),
-                        help="If 'more', adds upsampling layer between the two middle resnet blocks. "
-                             "If 'most', also add one more upsampling + resnet layer at the end of the generator")
     
     parser.add_argument('--ch', type=int, default=64, help='base channel number per layer')
 
@@ -53,33 +49,101 @@ def parse_args():
     parser.add_argument('--decay_epoch', type=int, default=50, help='decay epoch')
     parser.add_argument('--n_critic', type=int, default=1, help='The number of critic')
 
-    parser.add_argument('--label_nc', type=int, default=18, help='# of input label classes without unknown class. If you have unknown class as class label, specify --contain_dopntcare_label.')
+    parser.add_argument('--label_nc', type=int, default=19, help='# of input label classes without unknown class. If you have unknown class as class label, specify --contain_dopntcare_label.') # 이것도 나중에 넘겨주는 형식으로 바꿀 수 있을 것 같다. -> 가장 나중에 하기
 
-    parser.add_argument('--display_step', type=int, default=20, help='size of results is display_step * display_step')
+    parser.add_argument('--display_step', type=int, default=3000, help='size of results is display_step * display_step')
 
     parser.add_argument('--beta1', type=float, default=0.0, help='momentum term of adam')
     parser.add_argument('--beta2', type=float, default=0.9, help='momentum term of adam')
     parser.add_argument('--no_TTUR', action='store_true', help='Use TTUR training scheme')
+    parser.add_argument('--use_vae', action='store_true', help='enable training with an image encoder.')
+
+    parser.add_argument('--ngf', type=int, default=64, help='# of gen filters in first conv layer')
+    parser.add_argument('--crop_size', type=int, default=512, help='Crop to the width of crop_size (after initially scaling the images to load_size.)')
+
+    parser.add_argument('--norm_D', type=str, default='spectralinstance', help='instance normalization or batch normalization')
+    parser.add_argument('--norm_E', type=str, default='spectralinstance', help='instance normalization or batch normalization')
+
+    parser.add_argument('--aspect_ratio', type=float, default=1.0, help='The ratio width/height. The final height of the load image will be crop_size/aspect_ratio')
+    parser.add_argument('--contain_dontcare_label', action='store_true', help='if the label map contains dontcare label (dontcare=255)')
+
+    parser.add_argument('--norm_G', type=str, default='spectralspadeinstance3x3', help='instance normalization or batch normalization')
+    parser.add_argument('--num_upsampling_layers',
+                        choices=('normal', 'more', 'most'), default='normal',
+                        help="If 'more', adds upsampling layer between the two middle resnet blocks. If 'most', also add one more upsampling + resnet layer at the end of the generator")
+
+    parser.add_argument('--netD_subarch', type=str, default='n_layer', help='architecture of each discriminator')
+    parser.add_argument('--num_D', type=int, default=2, help='number of discriminators to be used in multiscale')
+    parser.add_argument('--n_layers_D', type=int, default=4, help='# layers in each discriminator')
+
+    parser.add_argument('--ndf', type=int, default=64, help='# of discrim filters in first conv layer')
+    parser.add_argument('--no_ganFeat_loss', action='store_true', help='if specified, do *not* use discriminator feature matching loss')
+    parser.add_argument('--no_vgg_loss', action='store_true', help='if specified, do *not* use VGG feature matching loss')
+    parser.add_argument('--output_nc', type=int, default=3, help='# of output image channels')
+
+    parser.add_argument('--niter', type=int, default=50, help='# of iter at starting learning rate. This is NOT the total #epochs. Totla #epochs is niter + niter_decay')
+    parser.add_argument('--niter_decay', type=int, default=0, help='# of iter to linearly decay learning rate to zero')
+
+    # define properties of each discriminator of the multiscale discriminator
+    # subnetD = util.find_class_in_module(opt.netD_subarch + 'discriminator', 'models.networks.discriminator')
 
     return parser.parse_args()
 
-def imsave(input, name):
+def imsave(input, name): # batch_size=1일 때
     input = input.detach()
     input = torch.squeeze(input) # batch 차원을 없애줬다.
     input = input.cpu().numpy().transpose((1, 2, 0))
     plt.imshow((input * 255).astype(np.uint8))
     plt.savefig(name)
 
-'''
-오늘의 목표 : network 다시 뜯어보고 main 돌아가게 만들기. 그리고 loss 잘 찍히는지 확인하기
-'''
+# Discriminator 한 번 더 확인하기 -> models.pix2pix_model.py
+
+def discriminate(netD, input_semantics, fake_image, real_image):
+        # print(input_semantics.shape, fake_image.shape, real_image.shape)
+        fake_concat = torch.cat([input_semantics, fake_image], dim=1)
+        real_concat = torch.cat([input_semantics, real_image], dim=1)
+
+        # In Batch Normalization, the fake and real images are
+        # recommended to be in the same batch to avoid disparate
+        # statistics in fake and real images.
+        # So both fake and real images are fed to D all at once.
+        fake_and_real = torch.cat([fake_concat, real_concat], dim=0)
+
+        discriminator_out = netD(fake_and_real)
+
+        pred_fake, pred_real = divide_pred(discriminator_out)
+
+        return pred_fake, pred_real
+
+# Take the prediction of fake and real images from the combined batch
+def divide_pred(pred):
+    # the prediction contains the intermediate outputs of multiscale GAN,
+    # so it's usually a list
+    if type(pred) == list:
+        fake = []
+        real = []
+        for p in pred:
+            fake.append([tensor[:tensor.size(0) // 2] for tensor in p])
+            real.append([tensor[tensor.size(0) // 2:] for tensor in p])
+    else:
+        fake = pred[:pred.size(0) // 2]
+        real = pred[pred.size(0) // 2:]
+
+    return fake, real
+
+def reparameterize(self, mu, logvar):
+    std = torch.exp(0.5 * logvar)
+    eps = torch.randn_like(std)
+    return eps.mul(std) + mu
 
 if __name__ == "__main__":
     args = parse_args()
 
     train_dataloader = load_dataset(args)
 
-    netG, netD, netE = Generator(args).to(device).train(), Discriminator(args).to(device).train(), Encoder(args).to(device).train()
+    netG, netD, netE = Generator(args).to(device).train(), MultiscaleDiscriminator(args).to(device).train(), None
+    if args.use_vae:
+        netE = Encoder(args).to(device).train()
 
     criterionGAN = GANLoss(opt=args)
     criterionFeat = torch.nn.L1Loss()
@@ -87,7 +151,7 @@ if __name__ == "__main__":
     KLDLoss = KLDLoss()
 
     G_params = list(netG.parameters())
-    if not args.random_style:
+    if args.use_vae:
         G_params += list(netE.parameters())
     D_params = list(netD.parameters())
 
@@ -100,27 +164,66 @@ if __name__ == "__main__":
     optimizer_G = torch.optim.Adam(G_params, lr=G_lr, betas=(beta1, beta2))
     optimizer_D = torch.optim.Adam(D_params, lr=D_lr, betas=(beta1, beta2))
 
+    start_time = time.time()
+    old_lr = args.lr
+
     for epoch in range(args.epoch):
-        for i, (real_x, label) in enumerate(train_dataloader):
+        for idx, (real_x, label) in tqdm(enumerate(train_dataloader)):
+            # print(f"idx is {idx}")
+            label = label.long()
+            real_x, label = real_x.to(device), label.to(device)
+            # print(label.shape)
+            
+            # create one-hot label map
+            label_map = label
+            # print(label_map.shape) # torch.Size([1, 3, 256, 256])
+            bs, _, h, w = label_map.size()
+            nc = args.label_nc + 1 if args.contain_dontcare_label else args.label_nc
+            FloatTensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
+            input_label = FloatTensor(bs, nc, h, w).zero_()
+            # # print(input_label.shape) # torch.Size([1, 18, 256, 256])
+            input_semantics = input_label.scatter_(1, label_map, 1.0)
+            # print(input_semantics.shape)
 
             # train generator
-            if i % args.n_critic == 0:
+            if idx % args.n_critic == 0:
+                
                 optimizer_G.zero_grad()
                 
+                z = None
                 ## kld loss
-                KLD_loss = None
-                if not args.random_style:
+                KLD_loss = torch.FloatTensor([0]).to(device)
+                if args.use_vae:
                     mu, logvar = netE(real_x)
+                    z = reparameterize(mu, logvar)
                     KLD_loss = KLDLoss(mu, logvar) * args.kl_weight
+                KLD_loss.requires_grad_(True)
 
-                fake_x = netG(label)
-                pred_fake, pred_real = netD(fake_x), netD(real_x)
-                
+                # print(label.shape) # torch.Size([1, 3, 256, 256])
+                fake_x = netG(input_semantics, z=z) # torch.Size([1, 3, 512, 512])
+                # 강제로 fake_x resize... -> 이것때문인건가?
+                tf = transforms.Resize((args.img_height, args.img_width), interpolation=Image.BICUBIC)
+                fake_x = tf(fake_x)
+                # print(fake_x.shape)
+                # pred_fake, pred_real = netD(fake_x), netD(real_x) # 오류난 곳!
+                # print(input_semantics.shape) # torch.Size([1, 18, 256, 256])
+                pred_fake, pred_real = discriminate(netD, input_semantics, fake_x, real_x)
+
                 ## gan loss
-                GAN_loss = criterionGAN(pred_fake, False)
-
+                # for i in range(len(pred_fake)):
+                #     for j in range(len(pred_fake[i])):
+                #         print(pred_fake[i][j].shape, pred_real[i][j].shape)
+                # torch.zeros_like(pred_fake)
+                # GAN_loss = criterionGAN(pred_fake, False)
+                loss = []
+                for i in range(len(pred_fake)):
+                    gan_loss = torch.mean(F.binary_cross_entropy_with_logits(input=pred_fake[i][-1], target=torch.ones_like(pred_fake[i][-1])))    
+                    loss.append(gan_loss)
+                GAN_loss = torch.mean(torch.FloatTensor(loss)).to(device)
+                GAN_loss.requires_grad_(True)
+                
                 ## feat loss
-                num_D = len(pred_fake)
+                num_D = len(pred_fake) # pred_fake가 리스트임을 안다는 건데...
                 GAN_Feat_loss = FloatTensor(1).fill_(0)
                 for i in range(num_D):  # for each discriminator
                     # last output is the final prediction, so we exclude it
@@ -129,127 +232,99 @@ if __name__ == "__main__":
                         unweighted_loss = criterionFeat(
                             pred_fake[i][j], pred_real[i][j].detach())
                         GAN_Feat_loss += unweighted_loss * args.feature_weight / num_D
-
+                # print(GAN_Feat_loss)
+                
                 ## vgg loss
                 VGG_loss = criterionVGG(fake_x, real_x) * args.vgg_weight
                 
+                # print(KLD_loss, GAN_loss, GAN_Feat_loss, VGG_loss)
                 g_loss = (KLD_loss + GAN_loss + GAN_Feat_loss + VGG_loss) / 4
+                # print(g_loss)
                 g_loss.backward()
                 optimizer_G.step()
             
             # train discriminator
             optimizer_D.zero_grad()
-            with torch.no_grad():
-                fake_x, _ = netG()
-                fake_x = fake_x.detach()
-                fake_x.requires_grad_()
+            # FAKE_loss = criterionGAN(pred_fake, False)
+            # REAL_loss = criterionGAN(pred_real, True)
 
-            pred_fake = netD()
-            pred_real = netD()
+            loss = []
+            for i in range(len(pred_fake)):
+                gan_loss = torch.mean(F.binary_cross_entropy_with_logits(input=pred_fake[i][-1], target=torch.zeros_like(pred_fake[i][-1])))    
+                loss.append(gan_loss)
+            FAKE_loss = torch.mean(torch.FloatTensor(loss)).to(device)
+            FAKE_loss.requires_grad_(True)
 
-            FAKE_loss = criterionGAN(pred_fake, False)
-            REAL_loss = criterionGAN(pred_real, True)
+            loss = []
+            for i in range(len(pred_real)):
+                gan_loss = torch.mean(F.binary_cross_entropy_with_logits(input=pred_real[i][-1], target=torch.zeros_like(pred_real[i][-1])))    
+                loss.append(gan_loss)
+            REAL_loss = torch.mean(torch.FloatTensor(loss)).to(device)
+            REAL_loss.requires_grad_(True)
 
+            # print(FAKE_loss, REAL_loss)
             d_loss = (FAKE_loss + REAL_loss) / 2
+            # print(d_loss)
             d_loss.backward()
             optimizer_D.step()
 
-        ''' 오늘의 목표 '''
+            # print(idx, args.display_step)
+            # print(f"g_loss is [{g_loss.item()}] and d_loss is [{d_loss.item()}]")
+            if idx % args.display_step == 0 and idx > 0:
+                print(f"[Visualization!] Iteration : {idx} || Generator loss: {g_loss.item()} || Discriminator loss: {d_loss.item()}")
 
-    # encoder = Encoder(args).to(device).train()
-    # generator = Generator(args).to(device).train()
-    # discriminator = Discriminator(args).to(device).train()
-
-    # random_style=False
-    
-    # if args.TTUR:
-    #     beta1 = 0.0
-    #     beta2 = 0.9
-
-    #     g_lr = args.lr / 2
-    #     d_lr = args.lr * 2
-
-    # else:
-    #     beta1 = args.beta1
-    #     beta2 = asgs.beta2
-    #     g_lr = args.lr
-    #     d_lr = args.lr
-
-    # G_params = list(generator.parameters())
-    # if not random_style:
-    #     G_params += list(encoder.parameters())
-    # D_params = list(discriminator.parameters())
-    
-    # G_optim = torch.optim.Adam(G_params, lr=g_lr, betas=(beta1, beta2), weight_decay=0.1)
-    # D_optim = torch.optim.Adam(D_params, lr=d_lr, betas=(beta1, beta2), weight_decay=0.1)
-
-    # start_time = time.time() 
-    # init_lr = args.lr
-
-    # for epoch in range(args.epoch):
-    #     # GPUtil.showUtilization()
-    #     for i, (real_x, segmap, segmap_onehot) in tqdm(enumerate(train_dataloader)):
-            
-    #         real_x, segmap_onehot = real_x.to(device), segmap_onehot.to(device)
-    #         if not random_style:
-    #             x_mean, x_var = encoder(real_x)
+                imsave(real_x, f"./sample/real_{epoch}_epoch_{idx}_iter.png")
+                imsave(fake_x, f"./sample/fake_{epoch}_epoch_{idx}_iter.png")
                 
-    #         fake_x = generator(segmap_onehot, x_mean, x_var, random_style)
-    #         random_fake_x = generator(segmap_onehot, random_style=True)
+        ''' Save model '''
+        print(f"Epoch : {epoch} || time : {time.time() - start_time} || Generator loss : {g_loss.item()} || Discriminator loss: {d_loss.item()}")
+        if args.use_vae:
+            torch.save(
+                {
+                    'netG': netG.state_dict(),
+                    'netD': netD.state_dict(),
+                    'netE': netE.state_dict(),
+                    'optimizer_G': optimizer_G.state_dict(),
+                    'optimizer_D': optimizer_D.state_dict(),
+                    'g_loss': g_loss,
+                    'd_loss': d_loss,
+                    'args': args,
+                },
+                f"./checkpoint/checkpoint_useVAE_{epoch}epoch_{i}iter.pt"
+            )
+        else:
+            torch.save(
+                {
+                    'netG': netG.state_dict(),
+                    'netD': netD.state_dict(),
+                    'optimizer_G': optimizer_G.state_dict(),
+                    'optimizer_D': optimizer_D.state_dict(),
+                    'g_loss': g_loss,
+                    'd_loss': d_loss,
+                    'args': args,
+                },
+                f"./checkpoint/checkpoint_{epoch}epoch_{i}iter.pt"
+            )
+
+        # update learning rate
+        if epoch > args.niter:
+                lrd = args.lr / args.niter_decay
+                new_lr = old_lr - lrd
+        else:
+            new_lr = old_lr
+
+        if new_lr != old_lr:
+            if args.no_TTUR:
+                new_lr_G = new_lr
+                new_lr_D = new_lr
+            else:
+                new_lr_G = new_lr / 2
+                new_lr_D = new_lr * 2
+
+            for param_group in optimizer_D.param_groups:
+                param_group['lr'] = new_lr_D
+            for param_group in optimizer_G.param_groups:
+                param_group['lr'] = new_lr_G
             
-    #         real_logit = discriminator(segmap_onehot, real_x)
-    #         fake_logit = discriminator(segmap_onehot, fake_x.detach())
-
-    #         GP = 0
-            
-    #         ''' Update Discriminator '''
-    #         D_optim.zero_grad()
-
-    #         d_adv_loss = args.adv_weight * (discriminator_loss("gan", real_logit, fake_logit) + GP) # tensor(1.8223)
-    #         d_loss = d_adv_loss
-
-    #         d_loss.backward()
-    #         D_optim.step()
-             
-    #         ''' Update Generator '''
-    #         if i % args.n_critic == 0:
-    #             G_optim.zero_grad()
-                
-    #             g_adv_loss = args.adv_weight * generator_loss("gan", fake_logit) # tensor(1.4685)
-    #             g_kl_loss = args.kl_weight * kl_loss(x_mean, x_var) # tensor(1.5650, device='cuda:0', grad_fn=<MulBackward0>)
-    #             g_vgg_loss = args.vgg_weight * VGGLoss()(real_x, fake_x) # tensor(9.3502, device='cuda:0') # 여기 fake_x.datach() 해야 하나..?
-    #             g_feature_loss = args.feature_weight * feature_loss(real_logit, fake_logit) # tensor(26.8884)
-    #             g_loss = (g_adv_loss + g_kl_loss + g_vgg_loss + g_feature_loss) / 4 # 수정함
-    #             # print(g_adv_loss, g_kl_loss, g_vgg_loss, g_feature_loss)
-    #             # print(g_loss)
-
-    #             g_loss.backward()
-    #             G_optim.step()
-
-    #         ''' Update Learning Rate '''
-    #         if args.decay_flag:
-    #             lr = init_lr if epoch < args.decay_epoch else init_lr * (args.epoch - epoch) / (args.epoch - args.decay_epoch)
-
-    #             for param_group in D_optim.param_groups:
-    #                 param_group['lr'] = lr
-
-    #             for param_group in G_optim.param_groups:
-    #                 param_group['lr'] = lr
-
-    #         ''' Visualization '''
-    #         if i % args.display_step == 0 and i > 0:
-    #             print(f"[Visualization!] Iteration : {i} || Generator loss: {g_loss} || discriminator loss: {d_loss}")
-
-    #             imsave(real_x, f"./sample/real_{epoch}_epoch_{i}_iter.png")
-    #             imsave(segmap, f"./sample/segmap_{epoch}_epoch_{i}_iter.png")
-    #             imsave(fake_x, f"./sample/fake_{epoch}_epoch_{i}_iter.png")
-    #             imsave(random_fake_x, f"./sample/random_fake_{epoch}_epoch_{i}_iter.png")
-                
-    #     ''' Save model '''
-    #     if epoch % 10 == 0:
-    #         # test에는 generator만 필요하니까 generator만 저장하면 되려나.
-    #         torch.save(generator.state_dict(), f"./checkpoint/generator_weight_{epoch}epoch_{i}iter.pt")
-
-    #     print(f"Epoch : {epoch} || time : {time.time() - start_time} || discriminator loss: {d_loss} || generator loss : {g_loss}")
-
-
+            print('update learning rate: %f -> %f' % (old_lr, new_lr))
+            old_lr = new_lr

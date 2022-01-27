@@ -23,16 +23,19 @@ class GANLoss(nn.Module):
         self.opt = opt
         
     def get_target_tensor(self, input, target_is_real):
+        # print(input)
         if target_is_real: # target_is_real이 True이면 (target은 real이다.)
             if self.real_label_tensor is None: # self.real_label_tensor가 없을 때
                 self.real_label_tensor = self.Tensor(1).fill_(self.real_label) 
                 self.real_label_tensor.requires_grad_(False)
             return self.real_label_tensor.expand_as(input) # self.real_label_tensor 는 input 크기만큼 1.0으로 채운 tensor
+            # return torch.ones_like(input)
         else: # target은 false이다.
             if self.fake_label_tensor is None:
                 self.fake_label_tensor = self.Tensor(1).fill_(self.fake_label)
                 self.fake_label_tensor.requires_grad_(False)
             return self.fake_label_tensor.expand_as(input) # self.fake_label_tensor 는 input 크기 만큼 0.0으로 채운 tensor
+            # return torch.zeros_like(input)
 
     def loss(self, input, target_is_real):
         target_tensor = self.get_target_tensor(input, target_is_real)
