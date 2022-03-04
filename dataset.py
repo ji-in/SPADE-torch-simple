@@ -10,10 +10,7 @@ from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from ast import literal_eval
-'''
-data.pix2pix_dataset.py
-'''
+
 
 class CustomDataset(Dataset):
     def __init__(self, args):
