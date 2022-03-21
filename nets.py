@@ -7,9 +7,6 @@ import numpy as np
 import sync_batchnorm
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding=0, 
-#                 dilation=1, groups=1, bias=True, padding_mode='zeros', device=None, dtype=None)
-# torch.nn.Linear(in_features, out_features, bias=True, device=None, dtype=None)
 
 class BaseNetwork(nn.Module):
     def __init__(self):

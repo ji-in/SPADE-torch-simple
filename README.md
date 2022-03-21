@@ -18,10 +18,12 @@
 
 ## Dataset
 
+To train quickly, only 10,000 images were used. 
+
 * Image : [CelebAMask-HQ](https://github.com/switchablenorms/CelebAMask-HQ)
 * Segmentation map : [Merging masks and colorizing them](https://github.com/ji-in/CelebAMask-HQ_to_colorImage)
 
-Something to keep in mind : It requires only `png` image. [convert jpg image to png image](https://github.com/ji-in/SPADE-torch-simple/blob/main/convert_jpg_to_png.py)
+Something to keep in mind : It requires only `png` image. [convert jpg image to png image.py](https://github.com/ji-in/SPADE-torch-simple/blob/main/convert_jpg_to_png.py)
 
 ## Training
 
@@ -31,13 +33,19 @@ python main.py
 
 ## Test
 
-I'll write it later:smile:
+```
+python test.py
+```
 
-## Using Pretrained Model
-
-I'll write it later:smile:
+* [pretrained](https://drive.google.com/file/d/156D5fdVyjrqAEfTMugTtKiiXZ1sLJBy-/view?usp=sharing)
+* segmap_label.txt : You can use the same file used for train.
 
 ## Result
 
-I'll write it later:smile:
+<img src="https://user-images.githubusercontent.com/40796092/159211114-d797bf7b-8e53-42d8-bd48-25bfa797d1a2.png" alt="image" style="zoom: 100%;" />
 
+## References
+
+https://github.com/NVlabs/SPADE
+
+https://github.com/taki0112/SPADE-Tensorflow

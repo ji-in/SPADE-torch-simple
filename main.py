@@ -1,9 +1,7 @@
 import argparse
 from dataset import load_dataset
 from nets import *
-# import torch.nn.functional as F
 from losses import *
-# import GPUtil
 import time
 from tqdm import tqdm
 import numpy as np
@@ -12,8 +10,6 @@ from torchvision import transforms
 from PIL import Image
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-# print(next(conv_128.parameters()).device)
 
 """parsing and configuration"""
 def parse_args():
@@ -84,9 +80,6 @@ def parse_args():
     parser.add_argument('--niter', type=int, default=50, help='# of iter at starting learning rate. This is NOT the total #epochs. Totla #epochs is niter + niter_decay')
     parser.add_argument('--niter_decay', type=int, default=0, help='# of iter to linearly decay learning rate to zero')
 
-    # define properties of each discriminator of the multiscale discriminator
-    # subnetD = util.find_class_in_module(opt.netD_subarch + 'discriminator', 'models.networks.discriminator')
-
     return parser.parse_args()
 
 def imsave(input, name): # batch_size=1일 때
@@ -95,8 +88,6 @@ def imsave(input, name): # batch_size=1일 때
     input = input.cpu().numpy().transpose((1, 2, 0))
     plt.imshow((input * 255).astype(np.uint8))
     plt.savefig(name)
-
-# Discriminator 한 번 더 확인하기 -> models.pix2pix_model.py
 
 def discriminate(netD, input_semantics, fake_image, real_image):
         # print(input_semantics.shape, fake_image.shape, real_image.shape)
@@ -176,14 +167,11 @@ if __name__ == "__main__":
             
             # create one-hot label map
             label_map = label
-            # print(label_map.shape) # torch.Size([1, 3, 256, 256])
             bs, _, h, w = label_map.size()
             nc = args.label_nc + 1 if args.contain_dontcare_label else args.label_nc
             FloatTensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
             input_label = FloatTensor(bs, nc, h, w).zero_()
-            # # print(input_label.shape) # torch.Size([1, 18, 256, 256])
             input_semantics = input_label.scatter_(1, label_map, 1.0)
-            # print(input_semantics.shape)
 
             # train generator
             if idx % args.n_critic == 0:
@@ -199,22 +187,13 @@ if __name__ == "__main__":
                     KLD_loss = KLDLoss(mu, logvar) * args.kl_weight
                 KLD_loss.requires_grad_(True)
 
-                # print(label.shape) # torch.Size([1, 3, 256, 256])
-                fake_x = netG(input_semantics, z=z) # torch.Size([1, 3, 512, 512])
-                # 강제로 fake_x resize... -> 이것때문인건가?
+                fake_x = netG(input_semantics, z=z)
+                # 강제로 fake_x resize...
                 tf = transforms.Resize((args.img_height, args.img_width), interpolation=Image.BICUBIC)
                 fake_x = tf(fake_x)
-                # print(fake_x.shape)
-                # pred_fake, pred_real = netD(fake_x), netD(real_x) # 오류난 곳!
-                # print(input_semantics.shape) # torch.Size([1, 18, 256, 256])
                 pred_fake, pred_real = discriminate(netD, input_semantics, fake_x, real_x)
 
                 ## gan loss
-                # for i in range(len(pred_fake)):
-                #     for j in range(len(pred_fake[i])):
-                #         print(pred_fake[i][j].shape, pred_real[i][j].shape)
-                # torch.zeros_like(pred_fake)
-                # GAN_loss = criterionGAN(pred_fake, False)
                 loss = []
                 for i in range(len(pred_fake)):
                     gan_loss = torch.mean(F.binary_cross_entropy_with_logits(input=pred_fake[i][-1], target=torch.ones_like(pred_fake[i][-1])))    
@@ -223,7 +202,7 @@ if __name__ == "__main__":
                 GAN_loss.requires_grad_(True)
                 
                 ## feat loss
-                num_D = len(pred_fake) # pred_fake가 리스트임을 안다는 건데...
+                num_D = len(pred_fake)
                 GAN_Feat_loss = FloatTensor(1).fill_(0)
                 for i in range(num_D):  # for each discriminator
                     # last output is the final prediction, so we exclude it
@@ -232,21 +211,16 @@ if __name__ == "__main__":
                         unweighted_loss = criterionFeat(
                             pred_fake[i][j], pred_real[i][j].detach())
                         GAN_Feat_loss += unweighted_loss * args.feature_weight / num_D
-                # print(GAN_Feat_loss)
                 
                 ## vgg loss
                 VGG_loss = criterionVGG(fake_x, real_x) * args.vgg_weight
                 
-                # print(KLD_loss, GAN_loss, GAN_Feat_loss, VGG_loss)
                 g_loss = (KLD_loss + GAN_loss + GAN_Feat_loss + VGG_loss) / 4
-                # print(g_loss)
                 g_loss.backward()
                 optimizer_G.step()
             
             # train discriminator
             optimizer_D.zero_grad()
-            # FAKE_loss = criterionGAN(pred_fake, False)
-            # REAL_loss = criterionGAN(pred_real, True)
 
             loss = []
             for i in range(len(pred_fake)):
@@ -262,14 +236,10 @@ if __name__ == "__main__":
             REAL_loss = torch.mean(torch.FloatTensor(loss)).to(device)
             REAL_loss.requires_grad_(True)
 
-            # print(FAKE_loss, REAL_loss)
             d_loss = (FAKE_loss + REAL_loss) / 2
-            # print(d_loss)
             d_loss.backward()
             optimizer_D.step()
 
-            # print(idx, args.display_step)
-            # print(f"g_loss is [{g_loss.item()}] and d_loss is [{d_loss.item()}]")
             if idx % args.display_step == 0 and idx > 0:
                 print(f"[Visualization!] Iteration : {idx} || Generator loss: {g_loss.item()} || Discriminator loss: {d_loss.item()}")
 
